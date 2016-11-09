@@ -119,7 +119,10 @@ private var transactionProductID = ""
  
  A protocol extension to manage in app purchase receipt validation.
  */
-public protocol SwiftyReceiptValidator: class { }
+public protocol SwiftyReceiptValidator: class {
+    func usesSubscriptions() -> Bool
+    func appSharesSecret() -> String
+}
 public extension SwiftyReceiptValidator {
     
     /// Validate receipt
@@ -153,35 +156,8 @@ private extension SwiftyReceiptValidator {
         // Check for valid receipt content for url
         
         // Receipt data
-        var receipt: Data?
         
-        do {
-            receipt = try Data(contentsOf: url)
-        }
-        
-        catch let error as NSError {
-            print(error.localizedDescription)
-            completionHandler(false)
-            return
-        }
-        
-        // Prepare payload
-        let receiptData = receipt?.base64EncodedString(options: Data.Base64EncodingOptions(rawValue: 0))
-        let payload = [JSONObjectKey.receiptData.rawValue: receiptData]
-        
-        var receiptPayloadData: Data?
-        
-        do {
-            receiptPayloadData = try JSONSerialization.data(withJSONObject: payload, options: JSONSerialization.WritingOptions(rawValue: 0))
-        }
-            
-        catch let error as NSError {
-            print(error.localizedDescription)
-            completionHandler(false)
-            return
-        }
-        
-        guard let payloadData = receiptPayloadData else {
+        guard let payloadData = self.payloadData(for: url) else {
             print(validationErrorString + "Payload data error")
             completionHandler(false)
             return
@@ -195,7 +171,7 @@ private extension SwiftyReceiptValidator {
         ///
         /// - parameter forURL: The url to handle the receipt request.
         /// - parameter data: The playload data for the request.
-        handleReceiptRequest(forURL: RequestURL.appleProduction.rawValue, data: payloadData) { [unowned self] (isSuccess, status) in
+        handleReceiptRequest(forURL: RequestURL.appleProduction.rawValue, data: payloadData) { [unowned self] (isSuccess, status, json) in
             guard !isSuccess else {
                 print("Receipt validation passed in production mode, unlocking product(s)")
                 completionHandler(true)
@@ -212,7 +188,7 @@ private extension SwiftyReceiptValidator {
             print(validationErrorString + "Production url used in sandbox mode, trying sandbox url...")
             
             /// Handle request to sandbox server
-            self.handleReceiptRequest(forURL: RequestURL.appleSandbox.rawValue, data: payloadData) { (isSuccess, status) in
+            self.handleReceiptRequest(forURL: RequestURL.appleSandbox.rawValue, data: payloadData) { (isSuccess, status, json) in
                 guard isSuccess else {
                     completionHandler(false)
                     print(validationErrorString + "Status = \(status ?? ReceiptStatusCode.unknown.rawValue)")
@@ -223,6 +199,40 @@ private extension SwiftyReceiptValidator {
                 completionHandler(true)
             }
         }
+    }
+    
+    func payloadData(for url: URL) -> Data? {
+        var receipt: Data?
+        
+        do {
+            receipt = try Data(contentsOf: url)
+        }
+            
+        catch let error as NSError {
+            print(error.localizedDescription)
+            return nil
+        }
+        
+        // Prepare payload
+        let receiptData = receipt?.base64EncodedString(options: Data.Base64EncodingOptions(rawValue: 0))
+        var payload = [JSONObjectKey.receiptData.rawValue: receiptData]
+        
+        if self.usesSubscriptions() {
+            payload[JSONObjectKey.password.rawValue] = self.appSharesSecret()
+        }
+        
+        var receiptPayloadData: Data?
+        
+        do {
+            receiptPayloadData = try JSONSerialization.data(withJSONObject: payload, options: JSONSerialization.WritingOptions(rawValue: 0))
+        }
+            
+        catch let error as NSError {
+            print(error.localizedDescription)
+            return nil
+        }
+        
+        return receiptPayloadData
     }
 }
 
@@ -237,12 +247,12 @@ private extension SwiftyReceiptValidator {
     ///
     /// - parameter url: The url string for the receipt request.
     /// - parameter data: The Data object for the request.
-    func handleReceiptRequest(forURL url: String, data: Data, withCompletionHandler completionHandler: @escaping (_ isSuccess: Bool, _ status: Int?) -> ()) {
+    func handleReceiptRequest(forURL url: String, data: Data, withCompletionHandler completionHandler: @escaping (_ isSuccess: Bool, _ status: Int?, _ json: [String : AnyObject]?) -> ()) {
         
         // Request url
         guard let requestURL = URL(string: url) else {
             print(validationErrorString + "Request url not found")
-            completionHandler(false, nil)
+            completionHandler(false, nil, nil)
             return
         }
         // Request
@@ -255,14 +265,14 @@ private extension SwiftyReceiptValidator {
             /// URL request error
             if let error = error {
                 print(validationErrorString + urlRequestString + error.localizedDescription)
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
             /// URL request data error
             guard let data = data else {
                 print(validationErrorString + urlRequestString + "Data error")
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
@@ -274,28 +284,28 @@ private extension SwiftyReceiptValidator {
             }
             catch let error as NSError {
                 print(validationErrorString + urlRequestString + error.localizedDescription)
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
             /// Parse json
             guard let parseJSON = json else {
                 print(validationErrorString + urlRequestString + "JSON parse error")
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
             /// Check for receipt status in json
             guard let status = parseJSON[JSONResponseKey.status.rawValue] as? Int else {
                 print(validationErrorString + urlRequestString + "Receipt status not found in json response")
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
             /// Check receipt status is valid
             guard status == ReceiptStatusCode.valid.rawValue else {
                 print(validationErrorString + urlRequestString + "Invalid receipt status in json response = \(status)")
-                completionHandler(false, status)
+                completionHandler(false, status, parseJSON)
                 return
             }
             
@@ -306,21 +316,21 @@ private extension SwiftyReceiptValidator {
             /// Check receipt send for verification exists in json response
             guard let receipt = parseJSON[JSONResponseKey.receipt.rawValue] else {
                 print(validationErrorString + urlRequestString + "Could not find receipt send for validation in json reponse")
-                completionHandler(false, nil)
+                completionHandler(false, nil, parseJSON)
                 return
             }
             
             print(urlRequestString + "Valid receipt in json reponse = \(receipt)")
             
             /// Check receipt contains correct bundle and product id for app
-            guard self.isAppBundleIDMatching(withReceipt: receipt) && self.isTransactionProductIDMatching(withReceipt: receipt) else {
-                completionHandler(false, nil)
+            guard self.isAppBundleIDMatching(withReceipt: receipt) && self.isTransactionProductIDMatching(withReceipt: receipt as! [String : AnyObject]) else {
+                completionHandler(false, nil, parseJSON)
                 return
             }
             
             // Validation successfull, unlock content
             print(urlRequestString + "Receipt verification successful")
-            completionHandler(true, nil)
+            completionHandler(true, nil, parseJSON)
         })
         
         task.resume()
@@ -349,7 +359,7 @@ private extension SwiftyReceiptValidator {
     /// Check if transaction product ID is matching with receipt product ID
     ///
     /// - parameter receipt: The receipt object to check the product ID with.
-    func isTransactionProductIDMatching(withReceipt receipt: AnyObject) -> Bool {
+    func isTransactionProductIDMatching(withReceipt receipt: [String: AnyObject]) -> Bool {
         guard let inApp = receipt[ReceiptInfoField.in_app.rawValue] as? [AnyObject] else {
             print(validationErrorString + urlRequestString + "Could not find receipt in app array in json response")
             return false
@@ -366,5 +376,90 @@ private extension SwiftyReceiptValidator {
         
         print(validationErrorString + urlRequestString + "Transaction product ID \(transactionProductID) not matching with receipt product id = \(receiptProductID)")
         return false
+    }
+}
+
+//MARK: Subscription Validation
+public extension SwiftyReceiptValidator {
+    func validateSubscription(forProductID productID: String, withCompletionHandler completionHandler: @escaping (Bool, Date?) -> ()) {
+        
+        transactionProductID = productID
+        
+        SwiftyReceiptObtainer.shared.fetch { [unowned self] receiptURL in
+            guard let validReceiptURL = receiptURL else {
+                print("Receipt fetch error")
+                completionHandler(false, nil)
+                return
+            }
+            
+            self.startSubscriptionValidation(forURL: validReceiptURL, withCompletionHandler: completionHandler)
+        }
+    }
+}
+
+private extension SwiftyReceiptValidator {
+    func startSubscriptionValidation(forURL url: URL, withCompletionHandler completionHandler: @escaping (Bool, Date?) -> ()) {
+        guard let payloadData = self.payloadData(for: url) else {
+            print(validationErrorString + "Payload data error")
+            completionHandler(false, nil)
+            return
+        }
+        
+        handleReceiptRequest(forURL: RequestURL.appleProduction.rawValue, data: payloadData) { [unowned self] (isSuccess, status, json) in
+            guard !isSuccess else {
+                print("Receipt validation passed in production mode, unlocking product(s)")
+                completionHandler(true, self.subscriptionExpirationDate(from: json))
+                return
+            }
+            
+            /// Check if failed production request was due to a test receipt
+            guard status == ReceiptStatusCode.testReceipt.rawValue else {
+                completionHandler(false, nil)
+                print(validationErrorString + "Status = \(status ?? ReceiptStatusCode.unknown.rawValue)")
+                return
+            }
+            
+            print(validationErrorString + "Production url used in sandbox mode, trying sandbox url...")
+            
+            /// Handle request to sandbox server
+            self.handleReceiptRequest(forURL: RequestURL.appleSandbox.rawValue, data: payloadData) { (isSuccess, status, json) in
+                guard isSuccess else {
+                    completionHandler(false, nil)
+                    print(validationErrorString + "Status = \(status ?? ReceiptStatusCode.unknown.rawValue)")
+                    return
+                }
+                
+                print("Receipt validation passed in sandbox mode, unlocking product(s)")
+                completionHandler(true, self.subscriptionExpirationDate(from: json))
+            }
+        }
+    }
+    
+    ///Tries to get subscription end date from JSON array. If no date is found, subscription is not valid (case for cancelling subscription)
+    func subscriptionExpirationDate(from aJson: [String: AnyObject]?) -> Date? {
+        guard let json = aJson else {return nil}
+        print(json)
+        
+        var receiptInfo: [AnyObject]?
+        receiptInfo = json[JSONResponseKey.latest_receipt_info.rawValue] as! [AnyObject]?
+        if receiptInfo == nil {
+            receiptInfo = json[JSONResponseKey.receipt.rawValue] as! [AnyObject]?
+        }
+        
+        guard let info = receiptInfo else {return nil}
+        
+        guard let latestRenewalInfo = info.last as? [String: AnyObject] else {
+            return nil
+        }
+        
+        print(latestRenewalInfo)
+        
+        let dateString = latestRenewalInfo[ReceiptInfoField.InApp.expires_date.rawValue] as! String
+        
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss VV"
+        let expirationDate = formatter.date(from: dateString)
+        
+        return expirationDate
     }
 }

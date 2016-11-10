@@ -435,7 +435,7 @@ private extension SwiftyReceiptValidator {
         }
     }
     
-    ///Tries to get subscription end date from JSON array. If no date is found, subscription is not valid (case for cancelling subscription)
+    ///Tries to get subscription end date from JSON array. If no date is found the subscription is not valid. If subscription is cancelled, method returns nil. For now checks only for one subscription - not checked for product id
     func subscriptionExpirationDate(from aJson: [String: AnyObject]?) -> Date? {
         guard let json = aJson else {return nil}
         print(json)
@@ -447,6 +447,14 @@ private extension SwiftyReceiptValidator {
         }
         
         guard let info = receiptInfo else {return nil}
+        
+        for dictionary in info {
+            if let dict = dictionary as? [String: AnyObject] {
+                if let _ = dict[ReceiptInfoField.InApp.cancellation_date.rawValue] {//subscription was cancelled
+                    return nil
+                }
+            }
+        }
         
         guard let latestRenewalInfo = info.last as? [String: AnyObject] else {
             return nil

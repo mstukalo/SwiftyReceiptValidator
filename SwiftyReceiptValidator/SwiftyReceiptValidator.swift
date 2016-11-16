@@ -365,6 +365,9 @@ private extension SwiftyReceiptValidator {
             return false
         }
         
+        //case for validating latest subscription
+        guard transactionProductID != dummyProductID else {return true}
+        
         var receiptProductID = ""
         
         for receiptInApp in inApp {
@@ -380,41 +383,49 @@ private extension SwiftyReceiptValidator {
 }
 
 //MARK: Subscription Validation
+fileprivate let dummyProductID = "notAProduct"
+
 public extension SwiftyReceiptValidator {
-    func validateSubscription(forProductID productID: String, withCompletionHandler completionHandler: @escaping (Bool, Date?) -> ()) {
+    func validateSubscription(forProductID productID: String, withCompletionHandler completionHandler: @escaping (_ isValid: Bool, _ subscriptionID: String?, _ expirationDate: Date?
+        ) -> ()) {
         
         transactionProductID = productID
         
         SwiftyReceiptObtainer.shared.fetch { [unowned self] receiptURL in
             guard let validReceiptURL = receiptURL else {
                 print("Receipt fetch error")
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 return
             }
             
             self.startSubscriptionValidation(forURL: validReceiptURL, withCompletionHandler: completionHandler)
         }
     }
+    
+    func validateLatestSubscription(withCompletionHandler completionHandler:@escaping(Bool, String?, Date?) -> ()) {
+        self.validateSubscription(forProductID: dummyProductID, withCompletionHandler: completionHandler)
+    }
 }
 
 private extension SwiftyReceiptValidator {
-    func startSubscriptionValidation(forURL url: URL, withCompletionHandler completionHandler: @escaping (Bool, Date?) -> ()) {
+    func startSubscriptionValidation(forURL url: URL, withCompletionHandler completionHandler: @escaping (_ isValid:Bool, _ subscriptionID: String?, _ expirationDate: Date?) -> ()) {
         guard let payloadData = self.payloadData(for: url) else {
             print(validationErrorString + "Payload data error")
-            completionHandler(false, nil)
+            completionHandler(false, nil, nil)
             return
         }
         
         handleReceiptRequest(forURL: RequestURL.appleProduction.rawValue, data: payloadData) { [unowned self] (isSuccess, status, json) in
             guard !isSuccess else {
                 print("Receipt validation passed in production mode, unlocking product(s)")
-                completionHandler(true, self.subscriptionExpirationDate(from: json))
+                let info = self.latestSubscriptionInfo(from: json)
+                completionHandler(true, info.subscriptionID, info.expirationDate)
                 return
             }
             
             /// Check if failed production request was due to a test receipt
             guard status == ReceiptStatusCode.testReceipt.rawValue else {
-                completionHandler(false, nil)
+                completionHandler(false, nil, nil)
                 print(validationErrorString + "Status = \(status ?? ReceiptStatusCode.unknown.rawValue)")
                 return
             }
@@ -424,21 +435,22 @@ private extension SwiftyReceiptValidator {
             /// Handle request to sandbox server
             self.handleReceiptRequest(forURL: RequestURL.appleSandbox.rawValue, data: payloadData) { (isSuccess, status, json) in
                 guard isSuccess else {
-                    completionHandler(false, nil)
+                    completionHandler(false, nil, nil)
                     print(validationErrorString + "Status = \(status ?? ReceiptStatusCode.unknown.rawValue)")
                     return
                 }
                 
                 print("Receipt validation passed in sandbox mode, unlocking product(s)")
-                completionHandler(true, self.subscriptionExpirationDate(from: json))
+                let info = self.latestSubscriptionInfo(from: json)
+                completionHandler(true, info.subscriptionID, info.expirationDate)
             }
         }
     }
     
-    ///Tries to get subscription end date from JSON array. If no date is found the subscription is not valid. If subscription is cancelled, method returns nil. For now checks only for one subscription - not checked for product id
-    func subscriptionExpirationDate(from aJson: [String: AnyObject]?) -> Date? {
-        guard let json = aJson else {return nil}
-        print(json)
+    ///Tries to get subscription end date from JSON array. If no date is found the subscription is not valid. If subscription is cancelled, method returns (nil, nil).
+    func latestSubscriptionInfo(from aJson: [String: AnyObject]?) -> (subscriptionID: String?, expirationDate: Date?) {
+        guard let json = aJson else {return (nil,nil)}
+//        print(json)
         
         var receiptInfo: [AnyObject]?
         receiptInfo = json[JSONResponseKey.latest_receipt_info.rawValue] as! [AnyObject]?
@@ -446,21 +458,25 @@ private extension SwiftyReceiptValidator {
             receiptInfo = json[JSONResponseKey.receipt.rawValue] as! [AnyObject]?
         }
         
-        guard let info = receiptInfo else {return nil}
+        guard let info = receiptInfo else {return (nil,nil)}
         
-        for dictionary in info {
-            if let dict = dictionary as? [String: AnyObject] {
-                if let _ = dict[ReceiptInfoField.InApp.cancellation_date.rawValue] {//subscription was cancelled
-                    return nil
-                }
-            }
-        }
+//        for dictionary in info {
+//            if let dict = dictionary as? [String: AnyObject] {
+//                if let _ = dict[ReceiptInfoField.InApp.cancellation_date.rawValue] {//subscription was cancelled
+//                    return (nil, nil)
+//                }
+//            }
+//        }
         
         guard let latestRenewalInfo = info.last as? [String: AnyObject] else {
-            return nil
+            return (nil, nil)
         }
         
-        print(latestRenewalInfo)
+        if let _ = latestRenewalInfo[ReceiptInfoField.InApp.cancellation_date.rawValue] {//subscription was cancelled
+            return (nil, nil)
+        }
+        
+//        print(latestRenewalInfo)
         
         let dateString = latestRenewalInfo[ReceiptInfoField.InApp.expires_date.rawValue] as! String
         
@@ -468,6 +484,8 @@ private extension SwiftyReceiptValidator {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss VV"
         let expirationDate = formatter.date(from: dateString)
         
-        return expirationDate
+        let subscriptionID = latestRenewalInfo[ReceiptInfoField.InApp.product_id.rawValue] as! String
+        
+        return (subscriptionID, expirationDate)
     }
 }
